@@ -7,6 +7,7 @@ Continuously shares active VS Code file + selection with [pi](https://github.com
 - VS Code extension writes active file, cursor, selection range/text, and open file paths.
 - Pi extension polls that file every 100ms.
 - Pi footer shows current file/selection, e.g. `ArticleBody.tsx (main) / 8 lines selected`.
+- The Pi extension replaces Pi's built-in footer, hiding the default cwd/path + git branch line. It keeps token/model stats and extension statuses.
 - Pi auto-injects selected text into the next prompt.
 - If nothing is selected, Pi injects only active file path + cursor.
 

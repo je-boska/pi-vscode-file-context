@@ -26,7 +26,7 @@ Continuously shares active VS Code file + selection with [pi](https://github.com
 ### 1. Install Pi package
 
 ```bash
-pi install git:github.com/je_boska/pi-vscode-file-context
+pi install git:github.com/je-boska/pi-vscode-file-context
 ```
 
 Then restart pi or run:

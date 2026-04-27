@@ -114,40 +114,6 @@ function basename(filePath: string): string {
   return path.basename(filePath) || filePath;
 }
 
-function findGitDir(start: string): string | undefined {
-  let dir = start;
-  while (true) {
-    const gitPath = path.join(dir, ".git");
-    try {
-      const stat = fs.statSync(gitPath);
-      if (stat.isDirectory()) return gitPath;
-      if (stat.isFile()) {
-        const content = fs.readFileSync(gitPath, "utf8").trim();
-        const match = content.match(/^gitdir:\s*(.+)$/);
-        if (match) return path.resolve(dir, match[1]);
-      }
-    } catch {
-      // keep walking
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) return undefined;
-    dir = parent;
-  }
-}
-
-function gitBranch(cwd: string): string | undefined {
-  const gitDir = findGitDir(cwd);
-  if (!gitDir) return undefined;
-  try {
-    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
-    const refPrefix = "ref: refs/heads/";
-    if (head.startsWith(refPrefix)) return head.slice(refPrefix.length);
-    return head ? head.slice(0, 7) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function selectedLineCount(active: ActiveFile): number {
   const sel = active.selection;
   if (!sel || sel.isEmpty) return 0;
@@ -157,8 +123,7 @@ function selectedLineCount(active: ActiveFile): number {
 function statusText(ctx: VSCodeContext | undefined, cwd: string): string {
   if (!ctx) return "VS Code offline";
   if (!ctx.activeFile) return "VS Code no file";
-  const branch = gitBranch(cwd);
-  const filename = `${basename(ctx.activeFile.path)}${branch ? ` (${branch})` : ""}`;
+  const filename = basename(ctx.activeFile.path);
   const lines = selectedLineCount(ctx.activeFile);
   if (lines > 0) return `${filename} / ${lines} ${lines === 1 ? "line" : "lines"} selected`;
   return filename;

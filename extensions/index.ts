@@ -190,7 +190,6 @@ function installCompactFooter(ctx: ExtensionContext): void {
       let totalOutput = 0;
       let totalCacheRead = 0;
       let totalCacheWrite = 0;
-      let totalCost = 0;
 
       for (const entry of ctx.sessionManager.getEntries() as any[]) {
         if (entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage) {
@@ -198,7 +197,6 @@ function installCompactFooter(ctx: ExtensionContext): void {
           totalOutput += entry.message.usage.output ?? 0;
           totalCacheRead += entry.message.usage.cacheRead ?? 0;
           totalCacheWrite += entry.message.usage.cacheWrite ?? 0;
-          totalCost += entry.message.usage.cost?.total ?? 0;
         }
       }
 
@@ -214,15 +212,14 @@ function installCompactFooter(ctx: ExtensionContext): void {
           ? theme.fg("warning", percentDisplay)
           : percentDisplay;
 
-      const statsParts: string[] = [];
-      if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-      if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-      if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-      if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
-      if (totalCost) statsParts.push(`$${totalCost.toFixed(3)}`);
-      statsParts.push(coloredPercent);
+      const statsParts: string[] = [`ctx ${coloredPercent}`];
+      if (totalInput || totalOutput) statsParts.push(`↑${formatTokens(totalInput)} ↓${formatTokens(totalOutput)}`);
+      const cacheParts: string[] = [];
+      if (totalCacheRead) cacheParts.push(`R${formatTokens(totalCacheRead)}`);
+      if (totalCacheWrite) cacheParts.push(`W${formatTokens(totalCacheWrite)}`);
+      if (cacheParts.length) statsParts.push(`cache ${cacheParts.join(" ")}`);
 
-      let left = statsParts.join(" ");
+      let left = statsParts.join(" · ");
       if (visibleWidth(left) > width) left = truncateToWidth(left, width, "...");
 
       const model = ctx.model?.id ?? "no-model";

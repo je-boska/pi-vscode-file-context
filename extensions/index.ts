@@ -1,0 +1,357 @@
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Type } from "typebox";
+import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+const CONTEXT_DIR = path.join(os.tmpdir(), "pi-vscode-file-context");
+const POLL_MS = 100;
+const STALE_MS = 24 * 60 * 60 * 1000;
+const MAX_INJECTED_SELECTION_CHARS = 64 * 1024;
+
+type Position = { line: number; character: number };
+type Range = { start: Position; end: Position };
+type Selection = Range & { text?: string; isEmpty?: boolean };
+type ActiveFile = {
+  path: string;
+  languageId?: string;
+  isDirty?: boolean;
+  cursor?: Position;
+  selection?: Selection;
+};
+type OpenFile = {
+  path: string;
+  languageId?: string;
+  isActive?: boolean;
+  isDirty?: boolean;
+};
+type VSCodeContext = {
+  version: 1;
+  updatedAt: number;
+  pid?: number;
+  workspaceFolders: string[];
+  isTrusted?: boolean;
+  activeFile?: ActiveFile;
+  openFiles?: OpenFile[];
+};
+
+let currentCtx: ExtensionContext | undefined;
+let currentContext: VSCodeContext | undefined;
+let currentFilePath: string | undefined;
+let currentMtimeMs = 0;
+let pollTimer: NodeJS.Timeout | undefined;
+let lastStatus = "";
+
+function isInside(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function findBestContextFile(cwd: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(CONTEXT_DIR);
+  } catch {
+    return undefined;
+  }
+
+  const candidates: Array<{ file: string; mtimeMs: number; score: number }> = [];
+  const now = Date.now();
+
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    const file = path.join(CONTEXT_DIR, name);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+      if (!stat.isFile()) continue;
+      if (now - stat.mtimeMs > STALE_MS) continue;
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as VSCodeContext;
+      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.workspaceFolders)) continue;
+      const score = parsed.workspaceFolders.some((folder) => isInside(folder, cwd)) ? 2 : 1;
+      candidates.push({ file, mtimeMs: stat.mtimeMs, score });
+    } catch {
+      // Ignore partial/stale/malformed files.
+    }
+  }
+
+  candidates.sort((a, b) => b.score - a.score || b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.file;
+}
+
+function readCurrentContext(cwd: string): VSCodeContext | undefined {
+  const file = currentFilePath ?? findBestContextFile(cwd);
+  if (!file) return undefined;
+
+  try {
+    const stat = fs.statSync(file);
+    if (Date.now() - stat.mtimeMs > STALE_MS) return undefined;
+
+    if (file === currentFilePath && stat.mtimeMs === currentMtimeMs) {
+      return currentContext;
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as VSCodeContext;
+    if (!parsed || parsed.version !== 1) return undefined;
+
+    currentFilePath = file;
+    currentMtimeMs = stat.mtimeMs;
+    currentContext = parsed;
+    return parsed;
+  } catch {
+    currentFilePath = undefined;
+    currentMtimeMs = 0;
+    return undefined;
+  }
+}
+
+function rel(filePath: string, cwd: string): string {
+  const r = path.relative(cwd, filePath);
+  return r && !r.startsWith("..") && !path.isAbsolute(r) ? r : filePath;
+}
+
+function basename(filePath: string): string {
+  return path.basename(filePath) || filePath;
+}
+
+function findGitDir(start: string): string | undefined {
+  let dir = start;
+  while (true) {
+    const gitPath = path.join(dir, ".git");
+    try {
+      const stat = fs.statSync(gitPath);
+      if (stat.isDirectory()) return gitPath;
+      if (stat.isFile()) {
+        const content = fs.readFileSync(gitPath, "utf8").trim();
+        const match = content.match(/^gitdir:\s*(.+)$/);
+        if (match) return path.resolve(dir, match[1]);
+      }
+    } catch {
+      // keep walking
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function gitBranch(cwd: string): string | undefined {
+  const gitDir = findGitDir(cwd);
+  if (!gitDir) return undefined;
+  try {
+    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
+    const refPrefix = "ref: refs/heads/";
+    if (head.startsWith(refPrefix)) return head.slice(refPrefix.length);
+    return head ? head.slice(0, 7) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function selectedLineCount(active: ActiveFile): number {
+  const sel = active.selection;
+  if (!sel || sel.isEmpty) return 0;
+  return Math.max(1, sel.end.line - sel.start.line + 1);
+}
+
+function statusText(ctx: VSCodeContext | undefined, cwd: string): string {
+  if (!ctx) return "VS Code offline";
+  if (!ctx.activeFile) return "VS Code no file";
+  const branch = gitBranch(cwd);
+  const filename = `${basename(ctx.activeFile.path)}${branch ? ` (${branch})` : ""}`;
+  const lines = selectedLineCount(ctx.activeFile);
+  if (lines > 0) return `${filename} / ${lines} ${lines === 1 ? "line" : "lines"} selected`;
+  return filename;
+}
+
+function brightBlue(text: string): string {
+  return `\x1b[94m${text}\x1b[0m`;
+}
+
+function sanitizeStatusText(text: string): string {
+  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
+}
+
+function formatTokens(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+function installCompactFooter(ctx: ExtensionContext): void {
+  ctx.ui.setFooter((_tui, theme, footerData) => ({
+    dispose() {},
+    invalidate() {},
+    render(width: number): string[] {
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalCacheRead = 0;
+      let totalCacheWrite = 0;
+      let totalCost = 0;
+
+      for (const entry of ctx.sessionManager.getEntries() as any[]) {
+        if (entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage) {
+          totalInput += entry.message.usage.input ?? 0;
+          totalOutput += entry.message.usage.output ?? 0;
+          totalCacheRead += entry.message.usage.cacheRead ?? 0;
+          totalCacheWrite += entry.message.usage.cacheWrite ?? 0;
+          totalCost += entry.message.usage.cost?.total ?? 0;
+        }
+      }
+
+      const usage = ctx.getContextUsage();
+      const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+      const percentValue = usage?.percent ?? 0;
+      const percentDisplay = usage?.percent == null
+        ? `?/${formatTokens(contextWindow)}`
+        : `${percentValue.toFixed(1)}%/${formatTokens(contextWindow)}`;
+      const coloredPercent = percentValue > 90
+        ? theme.fg("error", percentDisplay)
+        : percentValue > 70
+          ? theme.fg("warning", percentDisplay)
+          : percentDisplay;
+
+      const statsParts: string[] = [];
+      if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
+      if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
+      if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
+      if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+      if (totalCost) statsParts.push(`$${totalCost.toFixed(3)}`);
+      statsParts.push(coloredPercent);
+
+      let left = statsParts.join(" ");
+      if (visibleWidth(left) > width) left = truncateToWidth(left, width, "...");
+
+      const model = ctx.model?.id ?? "no-model";
+      const providerModel = ctx.model && footerData.getAvailableProviderCount() > 1
+        ? `(${ctx.model.provider}) ${model}`
+        : model;
+      const right = visibleWidth(left) + 2 + visibleWidth(providerModel) <= width ? providerModel : model;
+      const rightWidth = visibleWidth(right);
+      const leftWidth = visibleWidth(left);
+      const line = leftWidth + 2 + rightWidth <= width
+        ? theme.fg("dim", left) + " ".repeat(width - leftWidth - rightWidth) + theme.fg("dim", right)
+        : theme.fg("dim", truncateToWidth(left, width, "..."));
+
+      const lines = [line];
+      const statuses = Array.from(footerData.getExtensionStatuses().entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([, text]) => sanitizeStatusText(text));
+      if (statuses.length) {
+        lines.push(truncateToWidth(statuses.join(" "), width, theme.fg("dim", "...")));
+      }
+      return lines;
+    },
+  }));
+}
+
+function updateStatus(): void {
+  if (!currentCtx) return;
+  const ctx = readCurrentContext(currentCtx.cwd);
+  const text = statusText(ctx, currentCtx.cwd);
+  if (text === lastStatus) return;
+  lastStatus = text;
+  currentCtx.ui.setStatus("vscode", brightBlue(text));
+}
+
+function formatSelection(active: ActiveFile, cwd: string): string | undefined {
+  const sel = active.selection;
+  if (!sel || sel.isEmpty || !sel.text) return undefined;
+  const text = sel.text.length > MAX_INJECTED_SELECTION_CHARS
+    ? `${sel.text.slice(0, MAX_INJECTED_SELECTION_CHARS)}\n\n[truncated at ${MAX_INJECTED_SELECTION_CHARS} chars]`
+    : sel.text;
+  const lang = active.languageId ?? "";
+  const start = sel.start.line;
+  const end = sel.end.line;
+  const range = start === end ? `L${start}` : `L${start}:${end}`;
+  return `VS Code selection in ${rel(active.path, cwd)} ${range}:\n\`\`\`${lang}\n${text}\n\`\`\``;
+}
+
+function formatLightContext(active: ActiveFile, cwd: string): string {
+  const cursor = active.cursor ? ` cursor L${active.cursor.line}:C${active.cursor.character}` : "";
+  return `VS Code active file: ${rel(active.path, cwd)}${cursor}`;
+}
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    currentCtx = ctx;
+    installCompactFooter(ctx);
+    updateStatus();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(updateStatus, POLL_MS);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = undefined;
+    }
+    if (currentCtx) {
+      currentCtx.ui.setStatus("vscode", "");
+      currentCtx.ui.setFooter(undefined);
+    }
+    currentCtx = undefined;
+  });
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    const vscode = readCurrentContext(ctx.cwd);
+    const active = vscode?.activeFile;
+    if (!active) return;
+
+    const content = formatSelection(active, ctx.cwd) ?? formatLightContext(active, ctx.cwd);
+    return {
+      message: {
+        customType: "vscode-context",
+        content,
+        display: false,
+      },
+    };
+  });
+
+  pi.registerTool({
+    name: "get_vscode_context",
+    label: "Get VS Code Context",
+    description: "Get current VS Code active file, selection, and open files from the file-based companion.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const vscode = readCurrentContext(ctx.cwd);
+      return {
+        content: [{ type: "text", text: vscode ? JSON.stringify(vscode, null, 2) : "No VS Code context available." }],
+        details: {},
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "get_vscode_selection",
+    label: "Get VS Code Selection",
+    description: "Get selected text from the current VS Code editor, if any.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const active = readCurrentContext(ctx.cwd)?.activeFile;
+      const selection = active ? formatSelection(active, ctx.cwd) : undefined;
+      return {
+        content: [{ type: "text", text: selection ?? "No VS Code selection available." }],
+        details: {},
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "list_vscode_open_files",
+    label: "List VS Code Open Files",
+    description: "List files currently open in VS Code.",
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const vscode = readCurrentContext(ctx.cwd);
+      const files = vscode?.openFiles?.map((f) => ({ ...f, path: rel(f.path, ctx.cwd) })) ?? [];
+      return {
+        content: [{ type: "text", text: files.length ? JSON.stringify(files, null, 2) : "No VS Code open files available." }],
+        details: {},
+      };
+    },
+  });
+}

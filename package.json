@@ -1,0 +1,44 @@
+{
+  "name": "pi-vscode-file-context",
+  "displayName": "Pi VS Code File Context",
+  "description": "Continuously shares active VS Code file and selection with pi via a local temp file. No network server.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_GITHUB_USERNAME/pi-vscode-file-context.git"
+  },
+  "keywords": [
+    "pi-package",
+    "vscode",
+    "pi"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "files": [
+    "extension.js",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "piVscodeFileContext.showPath",
+        "title": "Pi Context: Show Context File Path"
+      }
+    ]
+  }
+}

@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -169,82 +168,6 @@ function brightBlue(text: string): string {
   return `\x1b[94m${text}\x1b[0m`;
 }
 
-function sanitizeStatusText(text: string): string {
-  return text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim();
-}
-
-function formatTokens(count: number): string {
-  if (count < 1000) return count.toString();
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  if (count < 1000000) return `${Math.round(count / 1000)}k`;
-  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-  return `${Math.round(count / 1000000)}M`;
-}
-
-function installCompactFooter(ctx: ExtensionContext): void {
-  ctx.ui.setFooter((_tui, theme, footerData) => ({
-    dispose() {},
-    invalidate() {},
-    render(width: number): string[] {
-      let totalInput = 0;
-      let totalOutput = 0;
-      let totalCacheRead = 0;
-      let totalCacheWrite = 0;
-
-      for (const entry of ctx.sessionManager.getEntries() as any[]) {
-        if (entry.type === "message" && entry.message?.role === "assistant" && entry.message.usage) {
-          totalInput += entry.message.usage.input ?? 0;
-          totalOutput += entry.message.usage.output ?? 0;
-          totalCacheRead += entry.message.usage.cacheRead ?? 0;
-          totalCacheWrite += entry.message.usage.cacheWrite ?? 0;
-        }
-      }
-
-      const usage = ctx.getContextUsage();
-      const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-      const percentValue = usage?.percent ?? 0;
-      const percentDisplay = usage?.percent == null
-        ? `?/${formatTokens(contextWindow)}`
-        : `${percentValue.toFixed(1)}%/${formatTokens(contextWindow)}`;
-      const coloredPercent = percentValue > 90
-        ? theme.fg("error", percentDisplay)
-        : percentValue > 70
-          ? theme.fg("warning", percentDisplay)
-          : percentDisplay;
-
-      const statsParts: string[] = [`ctx ${coloredPercent}`];
-      if (totalInput || totalOutput) statsParts.push(`↑${formatTokens(totalInput)} ↓${formatTokens(totalOutput)}`);
-      const cacheParts: string[] = [];
-      if (totalCacheRead) cacheParts.push(`R${formatTokens(totalCacheRead)}`);
-      if (totalCacheWrite) cacheParts.push(`W${formatTokens(totalCacheWrite)}`);
-      if (cacheParts.length) statsParts.push(`cache ${cacheParts.join(" ")}`);
-
-      let left = statsParts.join(" · ");
-      if (visibleWidth(left) > width) left = truncateToWidth(left, width, "...");
-
-      const model = ctx.model?.id ?? "no-model";
-      const providerModel = ctx.model && footerData.getAvailableProviderCount() > 1
-        ? `(${ctx.model.provider}) ${model}`
-        : model;
-      const right = visibleWidth(left) + 2 + visibleWidth(providerModel) <= width ? providerModel : model;
-      const rightWidth = visibleWidth(right);
-      const leftWidth = visibleWidth(left);
-      const line = leftWidth + 2 + rightWidth <= width
-        ? theme.fg("dim", left) + " ".repeat(width - leftWidth - rightWidth) + theme.fg("dim", right)
-        : theme.fg("dim", truncateToWidth(left, width, "..."));
-
-      const lines = [line];
-      const statuses = Array.from(footerData.getExtensionStatuses().entries())
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([, text]) => sanitizeStatusText(text));
-      if (statuses.length) {
-        lines.push(truncateToWidth(statuses.join(" "), width, theme.fg("dim", "...")));
-      }
-      return lines;
-    },
-  }));
-}
-
 function updateStatus(): void {
   if (!currentCtx) return;
   const ctx = readCurrentContext(currentCtx.cwd);
@@ -275,7 +198,6 @@ function formatLightContext(active: ActiveFile, cwd: string): string {
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    installCompactFooter(ctx);
     updateStatus();
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(updateStatus, POLL_MS);
@@ -286,10 +208,7 @@ export default function (pi: ExtensionAPI) {
       clearInterval(pollTimer);
       pollTimer = undefined;
     }
-    if (currentCtx) {
-      currentCtx.ui.setStatus("vscode", "");
-      currentCtx.ui.setFooter(undefined);
-    }
+    if (currentCtx) currentCtx.ui.setStatus("vscode", "");
     currentCtx = undefined;
   });
 

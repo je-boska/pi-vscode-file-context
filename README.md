@@ -17,6 +17,7 @@ Continuously shares active VS Code file + selection with [pi](https://github.com
 - No shell execution
 - No telemetry
 - Full file content is never written, only selected text
+- `.env*` files are excluded from active/open file context and selection capture
 - Selected text capped at 64KB
 - Selection text omitted when VS Code workspace is untrusted
 - Context file mode `0600`

@@ -1,6 +1,0 @@
-extensions/**
-.git/**
-.gitignore
-.vscodeignore
-*.vsix
-node_modules/**

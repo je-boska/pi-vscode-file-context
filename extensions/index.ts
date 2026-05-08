@@ -44,6 +44,7 @@ let currentFilePath: string | undefined;
 let currentMtimeMs = 0;
 let pollTimer: NodeJS.Timeout | undefined;
 let lastStatus = "";
+let disabled = false;
 
 function isInside(parent: string, child: string): boolean {
 	const rel = path.relative(parent, child);
@@ -168,8 +169,28 @@ function brightBlue(text: string): string {
 	return `\x1b[94m${text}\x1b[0m`;
 }
 
+function stopPollTimer(): void {
+	if (!pollTimer) return;
+	clearInterval(pollTimer);
+	pollTimer = undefined;
+}
+
+function clearStatus(): void {
+	if (currentCtx) currentCtx.ui.setStatus("vscode", "");
+	lastStatus = "";
+}
+
+function startPollTimer(): void {
+	stopPollTimer();
+	if (!disabled) pollTimer = setInterval(updateStatus, POLL_MS);
+}
+
 function updateStatus(): void {
 	if (!currentCtx) return;
+	if (disabled) {
+		clearStatus();
+		return;
+	}
 	const ctx = readCurrentContext(currentCtx.cwd);
 	const text = statusText(ctx);
 	if (text === lastStatus) return;
@@ -201,21 +222,24 @@ function formatLightContext(active: ActiveFile, cwd: string): string {
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
+		stopPollTimer();
+		if (disabled) {
+			clearStatus();
+			return;
+		}
 		updateStatus();
-		if (pollTimer) clearInterval(pollTimer);
-		pollTimer = setInterval(updateStatus, POLL_MS);
+		startPollTimer();
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (pollTimer) {
-			clearInterval(pollTimer);
-			pollTimer = undefined;
-		}
-		if (currentCtx) currentCtx.ui.setStatus("vscode", "");
+		stopPollTimer();
+		clearStatus();
 		currentCtx = undefined;
 	});
 
 	pi.on("before_agent_start", async (_event, ctx) => {
+		if (disabled) return;
+
 		const vscode = readCurrentContext(ctx.cwd);
 		const active = vscode?.activeFile;
 		if (!active) return;
@@ -231,6 +255,24 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+	pi.registerCommand("vscode-context", {
+		description: "Toggle VS Code context injection and status for this session",
+		handler: async (_args, ctx) => {
+			disabled = !disabled;
+			if (disabled) {
+				stopPollTimer();
+				clearStatus();
+				ctx.ui.notify("VS Code context disabled.", "info");
+				return;
+			}
+
+			currentCtx = ctx;
+			updateStatus();
+			startPollTimer();
+			ctx.ui.notify("VS Code context enabled.", "info");
+		},
+	});
+
 	pi.registerTool({
 		name: "get_vscode_context",
 		label: "Get VS Code Context",
@@ -238,6 +280,13 @@ export default function (pi: ExtensionAPI) {
 			"Get current VS Code active file, selection, and open files from the file-based companion.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			if (disabled) {
+				return {
+					content: [{ type: "text", text: "VS Code context is disabled." }],
+					details: {},
+				};
+			}
+
 			const vscode = readCurrentContext(ctx.cwd);
 			return {
 				content: [
@@ -259,6 +308,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Get selected text from the current VS Code editor, if any.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			if (disabled) {
+				return {
+					content: [{ type: "text", text: "VS Code context is disabled." }],
+					details: {},
+				};
+			}
+
 			const active = readCurrentContext(ctx.cwd)?.activeFile;
 			const selection = active ? formatSelection(active, ctx.cwd) : undefined;
 			return {
@@ -279,6 +335,13 @@ export default function (pi: ExtensionAPI) {
 		description: "List files currently open in VS Code.",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			if (disabled) {
+				return {
+					content: [{ type: "text", text: "VS Code context is disabled." }],
+					details: {},
+				};
+			}
+
 			const vscode = readCurrentContext(ctx.cwd);
 			const files =
 				vscode?.openFiles?.map((f) => ({ ...f, path: rel(f.path, ctx.cwd) })) ??

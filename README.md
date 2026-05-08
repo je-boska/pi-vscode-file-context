@@ -10,6 +10,7 @@ Continuously shares active VS Code file + selection with [pi](https://github.com
 - The Pi extension uses Pi's standard extension status line, so VS Code context appears below the default footer.
 - Pi auto-injects selected text into the next prompt.
 - If nothing is selected, Pi injects only active file path + cursor.
+- Toggle Pi-side context injection/status with `/vscode-context`.
 
 ## Security
 
